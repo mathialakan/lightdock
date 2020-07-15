@@ -30,56 +30,84 @@ int compare(const void *a, const void *b) {
     return (*da > *db) - (*da < *db);
 }
 
-
-/**
+/*
  *
- * Computation of Euclidean distances and selection of nearest atoms
  *
- **/
-void euclidean_dist(PyObject *receptor_coordinates, PyObject *ligand_coordinates,
-                    unsigned int **indexes, unsigned int *indexes_len) {
-    PyObject *tmp0, *tmp1;
-    unsigned int rec_len, lig_len, i, j, n;
-    double dist, **rec_array, **lig_array;
-    npy_intp dims[2];
+ */
 
-    *indexes_len = 0;
-    n = 0;
-
-    tmp0 = PyObject_GetAttrString(receptor_coordinates, "coordinates");
-    tmp1 = PyObject_GetAttrString(ligand_coordinates, "coordinates");
-
-    rec_len = PySequence_Size(tmp0);
-    lig_len = PySequence_Size(tmp1);
-
-    dims[1] = 3;
-    dims[0] = rec_len;
-    PyArray_AsCArray((PyObject **)&tmp0, (void **)&rec_array, dims, 2, PyArray_DescrFromType(NPY_DOUBLE));
-
-    dims[0] = lig_len;
-    PyArray_AsCArray((PyObject **)&tmp1, (void **)&lig_array, dims, 2, PyArray_DescrFromType(NPY_DOUBLE));
-
-    *indexes = malloc(3*rec_len*lig_len*sizeof(unsigned int));
-
-    for (i = 0; i < rec_len; i++) {
+void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len, unsigned int lig_len, unsigned int *indexes_len,
+                    unsigned long long * rec_obj, unsigned long long * lig_obj, unsigned int ** interface_receptor,
+                    unsigned int ** interface_ligand, unsigned int ** array, double interface_cutoff, unsigned int *interface_len,
+		    double * dfire_en_array, double *energy){
+   //unsigned int i, j, n = 0;
+   
+   unsigned int i, j, m, n = 0, d; //, indexes_len = 0, n = 0;
+   unsigned int atoma, atomb, dfire_bin ;
+   double dist = 0.0;;
+        printf("dist %.f \n", dist);
+     	unsigned int * indexes = malloc(3*rec_len*lig_len*sizeof(unsigned int));
+        for (i = 0; i < rec_len; i++) {
         for (j = 0; j < lig_len; j++) {
             dist = pow((rec_array[i][0] - lig_array[j][0]), 2.0) +
                    pow((rec_array[i][1] - lig_array[j][1]), 2.0) +
                    pow((rec_array[i][2] - lig_array[j][2]), 2.0);
             if (dist <= 225.) {
-                (*indexes)[n++] = i;
-                (*indexes)[n++] = j;
-                (*indexes)[n++] = (sqrt(dist)*2.0 - 1.0);
+                indexes[n++] = i;
+                indexes[n++] = j;
+                indexes[n++] = (sqrt(dist)*2.0 - 1.0);
                 (*indexes_len)++;
             }
         }
-    }
-    *indexes = realloc(*indexes, n*sizeof(unsigned int));
-    PyArray_Free(tmp0, rec_array);
-    PyArray_Free(tmp1, lig_array);
-    Py_DECREF(tmp0);
-    Py_DECREF(tmp1);
+        }
+     printf("dist: %.f \n", dist);
+     indexes = realloc(indexes, n*sizeof(unsigned int));
+    // free(*interface_receptor);
+
+    //---------------------------------------------------------
+
+      size_t bytes = (*indexes_len)*sizeof(unsigned int);
+      //unsigned int 
+      *array = malloc(bytes);
+      *interface_receptor = malloc(bytes);
+      *interface_ligand = malloc(bytes);
+
+
+     for (n = m = 0; n < (*indexes_len); n++) {
+
+            i = indexes[m++];
+            j = indexes[m++];
+            d = indexes[m++];
+
+            if (d <= interface_cutoff) {
+                (*interface_receptor)[(*interface_len)] = i;
+                (*interface_ligand)[(*interface_len)++] = j;
+            }
+
+            atoma = rec_obj[i];
+            atomb = lig_obj[j];
+
+            dfire_bin = dist_to_bins[d] - 1;
+
+            (*array)[n] = atoma*168*20 + atomb*20 + dfire_bin;
+        }
+     
+    //---------------------------------------------------------
+    
+       // unsigned int index;
+        for (n = 0; n < (*indexes_len); n++) {
+           // index = (*array)[n];
+            (*energy) += dfire_en_array[n];
+        }
+
+//        free(*array);
+ 
+   
+        free(indexes);
+        printf("indexes_len: %d\n", (*indexes_len));
+
+
 }
+
 
 
 /**
@@ -89,9 +117,10 @@ void euclidean_dist(PyObject *receptor_coordinates, PyObject *ligand_coordinates
  **/
 static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
     PyObject *receptor, *ligand, *dfire_energy, *receptor_coordinates, *ligand_coordinates;
-    PyObject *take, *intf_rec_array_object, *intf_lig_array_object, *array_object, *tmp0, *tmp1, **rec_objects, **lig_objects, *result = NULL;
+    PyObject *take, *array_object,  *result = NULL;
     PyArrayObject *df_en_array;
-    unsigned int n, m, i, j, d, dfire_bin, atoma, atomb, indexes_len, interface_len, *array, *interface_receptor, *interface_ligand, *indexes;
+    //PyObject *df_en_array;
+    unsigned int  indexes_len, interface_len, *array=NULL, *interface_receptor=NULL, *interface_ligand=NULL;// *indexes;
     double interface_cutoff, energy, *dfire_en_array;
     npy_intp dims[1];
 
@@ -100,44 +129,63 @@ static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
     interface_len = 0;
 
     if (PyArg_ParseTuple(args, "OOOOO|d", &receptor, &ligand, &dfire_energy, &receptor_coordinates, &ligand_coordinates, &interface_cutoff)) {
-        euclidean_dist(receptor_coordinates, ligand_coordinates, &indexes, &indexes_len);
 
-        array = malloc(indexes_len*sizeof(unsigned int));
-        interface_receptor = malloc(indexes_len*sizeof(unsigned int));
-        interface_ligand = malloc(indexes_len*sizeof(unsigned int));
+        PyObject *tmp0, *tmp1, *tmp2, *tmp3;
+	unsigned int rec_len, lig_len;
+    	double  **rec_array, **lig_array;
+    	npy_intp dims[2];
+    	npy_intp dims_1[1];
+
+    	indexes_len = 0;
+
+    	tmp0 = PyObject_GetAttrString(receptor_coordinates, "coordinates");
+    	tmp1 = PyObject_GetAttrString(ligand_coordinates, "coordinates");
+
+    	rec_len = PySequence_Size(tmp0);
+    	lig_len = PySequence_Size(tmp1);
+
+    	dims[1] = 3;
+    	dims[0] = rec_len;
+    	PyArray_AsCArray((PyObject **)&tmp0, (void **)&rec_array, dims, 2, PyArray_DescrFromType(NPY_DOUBLE));
+
+    	dims[0] = lig_len;
+    	PyArray_AsCArray((PyObject **)&tmp1, (void **)&lig_array, dims, 2, PyArray_DescrFromType(NPY_DOUBLE));
+
+       // * Computation of Euclidean distances and selection of nearest atoms
+      // indexes = malloc(3*rec_len*lig_len*sizeof(unsigned int));
+	//euclidean_dist(rec_array, lig_array, rec_len, lig_len, &indexes, &indexes_len);
+
+//	PyArray_Free(tmp0, rec_array);
+//    	PyArray_Free(tmp1, lig_array);
+    	Py_DECREF(tmp0);
+    	Py_DECREF(tmp1);
+
 
         // Do not need to free rec_objects and lig_objects
-        tmp0 = PyObject_GetAttrString(receptor, "objects");
-        tmp1 = PySequence_Fast(tmp0, "");
-        Py_DECREF(tmp0);
-        rec_objects = PySequence_Fast_ITEMS(tmp1);
-        Py_DECREF(tmp1);
+        tmp2 = PyObject_GetAttrString(receptor, "objects");
+        int rec_obj_len = PySequence_Size(tmp2);
+        tmp2 = PySequence_Fast(tmp2, "");
+        Py_DECREF(tmp2);
+	//rec_objects = PySequence_Fast_ITEMS(tmp1);
+        //Py_DECREF(tmp1);
 
-        tmp0 = PyObject_GetAttrString(ligand, "objects");
-        tmp1 = PySequence_Fast(tmp0, "");
-        Py_DECREF(tmp0);
-        lig_objects = PySequence_Fast_ITEMS(tmp1);
-        Py_DECREF(tmp1);
+	dims_1[0] = rec_obj_len;
+        unsigned long long * rec_obj;
+        PyArray_AsCArray( (PyObject **)&tmp2, (void *)&rec_obj, dims_1, 1, PyArray_DescrFromType(NPY_INT));
 
-        for (n = m = 0; n < indexes_len; n++) {
+        tmp3 = PyObject_GetAttrString(ligand, "objects");
+        int lig_obj_len = PySequence_Size(tmp3);
+        tmp3 = PySequence_Fast(tmp3, "");
+        Py_DECREF(tmp3);
+        //lig_objects = PySequence_Fast_ITEMS(tmp3);
+        //Py_DECREF(tmp3);
+        dims_1[0] = lig_obj_len;
+        unsigned long long * lig_obj;
+        PyArray_AsCArray((PyObject **) &tmp3, (void *)&lig_obj, dims_1, 1, PyArray_DescrFromType(NPY_INT));
 
-            i = indexes[m++];
-            j = indexes[m++];
-            d = indexes[m++];
-
-            if (d <= interface_cutoff) {
-                interface_receptor[interface_len] = i;
-                interface_ligand[interface_len++] = j;
-            }
-
-            atoma = PyInt_AsUnsignedLongMask(rec_objects[i]);
-            atomb = PyInt_AsUnsignedLongMask(lig_objects[j]);
-
-            dfire_bin = dist_to_bins[d] - 1;
-
-            array[n] = atoma*168*20 + atomb*20 + dfire_bin;
-        }
-
+        //df_en_array = PyArray_FROM_OTF(dfire_energy, NPY_DOUBLE, NPY_ARRAY_IN_ARRAY);
+	//dfire_en_array = (double*)PyArray_DATA(df_en_array);
+ 
         dims[0] = indexes_len;
         tmp0 = PyImport_ImportModule("numpy");
         take = PyObject_GetAttrString(tmp0, "take");
@@ -146,17 +194,23 @@ static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
         df_en_array = (PyArrayObject *)PyObject_CallFunctionObjArgs(take, dfire_energy, array_object, NULL);
         dfire_en_array = PyArray_GETPTR1(df_en_array, 0);
 
-        for (n = 0; n < dims[0]; n++) {
-            energy += dfire_en_array[n];
-        }
+        //printf("size: %ld \n", sizeof(dfire_en_array));
+
+	compute_acc(rec_array, lig_array, rec_len, lig_len, &indexes_len,
+                       rec_obj, lig_obj,  &interface_receptor, &interface_ligand, &array, interface_cutoff, &interface_len, dfire_en_array, &energy);
+
+        PyArray_Free(tmp0, rec_array);
+        PyArray_Free(tmp1, lig_array);
+        PyArray_Free(tmp2, rec_obj);
+        PyArray_Free(tmp3, lig_obj);
+
         
         free(array);
-        free(indexes);
+        //free(indexes);
 
         Py_DECREF(df_en_array);
         Py_DECREF(array_object);
         Py_DECREF(take);
-
     }
 
     dims[0] = interface_len;
