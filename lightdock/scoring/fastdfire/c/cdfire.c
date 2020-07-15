@@ -31,7 +31,7 @@ int compare(const void *a, const void *b) {
 }
 
 /*
- *
+ *  Acceleratble code using GPU or OpenACC etc.
  *
  */
 
@@ -39,73 +39,75 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
                     unsigned long long * rec_obj, unsigned long long * lig_obj, unsigned int ** interface_receptor,
                     unsigned int ** interface_ligand, unsigned int ** array, double interface_cutoff, unsigned int *interface_len,
 		    double * dfire_en_array, double *energy){
-   //unsigned int i, j, n = 0;
    
-   unsigned int i, j, m, n = 0, d; //, indexes_len = 0, n = 0;
+   unsigned int i, j, m, n = 0, d; //, indexes_len = 0;
    unsigned int atoma, atomb, dfire_bin ;
-   double dist = 0.0;;
-        printf("dist %.f \n", dist);
-     	unsigned int * indexes = malloc(3*rec_len*lig_len*sizeof(unsigned int));
-        for (i = 0; i < rec_len; i++) {
+   unsigned int tot_len  = rec_len*lig_len;
+   //size_t bytes1 = tot_len*sizeof(unsigned int);
+   double * dist = malloc(tot_len*sizeof(double));
+   unsigned int * indexes = malloc(3*tot_len*sizeof(unsigned int));
+   
+   //---------------------------------------------------------
+   //Computing distance 
+   double sub1, sub2, sub3;
+   for (i = 0; i < rec_len; i++) {
         for (j = 0; j < lig_len; j++) {
-            dist = pow((rec_array[i][0] - lig_array[j][0]), 2.0) +
-                   pow((rec_array[i][1] - lig_array[j][1]), 2.0) +
-                   pow((rec_array[i][2] - lig_array[j][2]), 2.0);
-            if (dist <= 225.) {
-                indexes[n++] = i;
-                indexes[n++] = j;
-                indexes[n++] = (sqrt(dist)*2.0 - 1.0);
+            sub1 = rec_array[i][0] - lig_array[j][0];
+            sub2 = rec_array[i][1] - lig_array[j][1];
+            sub3 = rec_array[i][2] - lig_array[j][2];
+            dist[n++] = sub1*sub1 + sub2*sub2 + sub3*sub3;
+        }
+    }
+
+   //Selecting the nearest atoms
+   n = 0;
+   for(i = 0; i < tot_len; i++){
+       if (dist[i] <= 225.) {
+                indexes[n++] = i/rec_len;
+                indexes[n++] = i%rec_len;
+                indexes[n++] = (sqrt(dist[i])*2.0 - 1.0);
                 (*indexes_len)++;
             }
-        }
-        }
-     printf("dist: %.f \n", dist);
-     indexes = realloc(indexes, n*sizeof(unsigned int));
+   }
+
+   indexes = realloc(indexes, n*sizeof(unsigned int));
     // free(*interface_receptor);
 
-    //---------------------------------------------------------
+   //---------------------------------------------------------
+   // Computing receptor_ligand interface
+   size_t bytes = (*indexes_len)*sizeof(unsigned int);
+   *array = malloc(bytes);
+   *interface_receptor = malloc(bytes);
+   *interface_ligand = malloc(bytes);
 
-      size_t bytes = (*indexes_len)*sizeof(unsigned int);
-      //unsigned int 
-      *array = malloc(bytes);
-      *interface_receptor = malloc(bytes);
-      *interface_ligand = malloc(bytes);
+   for(n = m = 0; n < (*indexes_len); n++){ 
+       i = indexes[m++];
+       j = indexes[m++];
+       d = indexes[m++];
 
-
-     for (n = m = 0; n < (*indexes_len); n++) {
-
-            i = indexes[m++];
-            j = indexes[m++];
-            d = indexes[m++];
-
-            if (d <= interface_cutoff) {
-                (*interface_receptor)[(*interface_len)] = i;
-                (*interface_ligand)[(*interface_len)++] = j;
-            }
-
-            atoma = rec_obj[i];
-            atomb = lig_obj[j];
-
-            dfire_bin = dist_to_bins[d] - 1;
-
-            (*array)[n] = atoma*168*20 + atomb*20 + dfire_bin;
-        }
+       if (d <= interface_cutoff) {
+           (*interface_receptor)[(*interface_len)] = i;
+           (*interface_ligand)[(*interface_len)++] = j;
+       }
+       atoma = rec_obj[i];
+       atomb = lig_obj[j];
+       dfire_bin = dist_to_bins[d] - 1;
+    
+       (*array)[n] = atoma*168*20 + atomb*20 + dfire_bin;
+   }
      
     //---------------------------------------------------------
-    
-       // unsigned int index;
-        for (n = 0; n < (*indexes_len); n++) {
-           // index = (*array)[n];
-            (*energy) += dfire_en_array[n];
-        }
+    // Computing energy 
+    // unsigned int index;
+    for (n = 0; n < (*indexes_len); n++) {
+      // index = (*array)[n];
+        (*energy) += dfire_en_array[n];
+    }
 
 //        free(*array);
- 
    
         free(indexes);
-        printf("indexes_len: %d\n", (*indexes_len));
-
-
+  //      printf("indexes_len: %d\n", (*indexes_len));
 }
 
 
