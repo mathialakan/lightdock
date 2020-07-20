@@ -1,9 +1,18 @@
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #define PyInt_AsUnsignedLongMask PyLong_AsUnsignedLongMask
+//#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "structmember.h"
 #include "numpy/arrayobject.h"
 
+
+extern void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len, unsigned int lig_len,
+                    unsigned long * rec_obj, unsigned long * lig_obj, unsigned int ** interface_receptor,
+                    unsigned int ** interface_ligand, double interface_cutoff, unsigned int *interface_len,
+                    double * dfire_en_array, double *energy); 
+
+
+//extern void add();
 
 /**
  *
@@ -34,13 +43,13 @@ int compare(const void *a, const void *b) {
  *  Acceleratble code using GPU or OpenACC etc.
  *
  */
-
-void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len, unsigned int lig_len, unsigned int *indexes_len,
-                    unsigned long long * rec_obj, unsigned long long * lig_obj, unsigned int ** interface_receptor,
-                    unsigned int ** interface_ligand, unsigned int ** array, double interface_cutoff, unsigned int *interface_len,
+/*
+void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len, unsigned int lig_len, 
+                    unsigned long * rec_obj, unsigned long * lig_obj, unsigned int ** interface_receptor,
+                    unsigned int ** interface_ligand, double interface_cutoff, unsigned int *interface_len,
 		    double * dfire_en_array, double *energy){
    
-   unsigned int i, j, m, n = 0, d; //, indexes_len = 0;
+   unsigned int i, j, m, n = 0, d, indexes_len = 0;
    unsigned int atoma, atomb, dfire_bin ;
    unsigned int tot_len  = rec_len*lig_len;
    //size_t bytes1 = tot_len*sizeof(unsigned int);
@@ -59,14 +68,14 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
         }
     }
 
-   //Selecting the nearest atoms
+   //Filtering atoms
    n = 0;
    for(i = 0; i < tot_len; i++){
        if (dist[i] <= 225.) {
                 indexes[n++] = i/rec_len;
                 indexes[n++] = i%rec_len;
                 indexes[n++] = (sqrt(dist[i])*2.0 - 1.0);
-                (*indexes_len)++;
+                indexes_len++;
             }
    }
 
@@ -75,12 +84,12 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
 
    //---------------------------------------------------------
    // Computing receptor_ligand interface
-   size_t bytes = (*indexes_len)*sizeof(unsigned int);
-   *array = malloc(bytes);
+   size_t bytes = indexes_len*sizeof(unsigned int);
+   unsigned int *array = malloc(bytes);
    *interface_receptor = malloc(bytes);
    *interface_ligand = malloc(bytes);
 
-   for(n = m = 0; n < (*indexes_len); n++){ 
+   for(n = m = 0; n < indexes_len; n++){ 
        i = indexes[m++];
        j = indexes[m++];
        d = indexes[m++];
@@ -93,24 +102,24 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
        atomb = lig_obj[j];
        dfire_bin = dist_to_bins[d] - 1;
     
-       (*array)[n] = atoma*168*20 + atomb*20 + dfire_bin;
+       array[n] = atoma*168*20 + atomb*20 + dfire_bin;
    }
      
     //---------------------------------------------------------
     // Computing energy 
-    // unsigned int index;
-    for (n = 0; n < (*indexes_len); n++) {
-      // index = (*array)[n];
+    unsigned int index;
+    for (n = 0; n < indexes_len; n++) {
+       index = array[n];
         (*energy) += dfire_en_array[n];
     }
 
-//        free(*array);
+        free(array);
    
         free(indexes);
   //      printf("indexes_len: %d\n", (*indexes_len));
 }
 
-
+*/
 
 /**
  *
@@ -118,12 +127,12 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
  *
  **/
 static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
-    PyObject *receptor, *ligand, *dfire_energy, *receptor_coordinates, *ligand_coordinates;
-    PyObject *take, *array_object,  *result = NULL;
+    PyObject *receptor, *ligand, *receptor_coordinates, *ligand_coordinates;
+    PyObject  *result = NULL;
     PyArrayObject *df_en_array;
-    //PyObject *df_en_array;
-    unsigned int  indexes_len, interface_len, *array=NULL, *interface_receptor=NULL, *interface_ligand=NULL;// *indexes;
-    double interface_cutoff, energy, *dfire_en_array;
+    PyArrayObject *dfire_energy;
+    unsigned int  interface_len, *interface_receptor=NULL, *interface_ligand=NULL;
+    double interface_cutoff, energy, *dfire_en_array=NULL;
     npy_intp dims[1];
 
     interface_cutoff = 3.9;
@@ -132,13 +141,11 @@ static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
 
     if (PyArg_ParseTuple(args, "OOOOO|d", &receptor, &ligand, &dfire_energy, &receptor_coordinates, &ligand_coordinates, &interface_cutoff)) {
 
-        PyObject *tmp0, *tmp1, *tmp2, *tmp3;
+        PyObject *tmp0, *tmp1, *tmp2, *tmp3; 
 	unsigned int rec_len, lig_len;
     	double  **rec_array, **lig_array;
     	npy_intp dims[2];
     	npy_intp dims_1[1];
-
-    	indexes_len = 0;
 
     	tmp0 = PyObject_GetAttrString(receptor_coordinates, "coordinates");
     	tmp1 = PyObject_GetAttrString(ligand_coordinates, "coordinates");
@@ -172,7 +179,7 @@ static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
         //Py_DECREF(tmp1);
 
 	dims_1[0] = rec_obj_len;
-        unsigned long long * rec_obj;
+        unsigned long * rec_obj;
         PyArray_AsCArray( (PyObject **)&tmp2, (void *)&rec_obj, dims_1, 1, PyArray_DescrFromType(NPY_INT));
 
         tmp3 = PyObject_GetAttrString(ligand, "objects");
@@ -182,43 +189,29 @@ static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
         //lig_objects = PySequence_Fast_ITEMS(tmp3);
         //Py_DECREF(tmp3);
         dims_1[0] = lig_obj_len;
-        unsigned long long * lig_obj;
+        unsigned long * lig_obj;
         PyArray_AsCArray((PyObject **) &tmp3, (void *)&lig_obj, dims_1, 1, PyArray_DescrFromType(NPY_INT));
+        
 
-        //df_en_array = PyArray_FROM_OTF(dfire_energy, NPY_DOUBLE, NPY_ARRAY_IN_ARRAY);
-	//dfire_en_array = (double*)PyArray_DATA(df_en_array);
- 
-        dims[0] = indexes_len;
-        tmp0 = PyImport_ImportModule("numpy");
-        take = PyObject_GetAttrString(tmp0, "take");
-        Py_DECREF(tmp0);
-        array_object = PyArray_SimpleNewFromData(1, dims, NPY_UINT, array);
-        df_en_array = (PyArrayObject *)PyObject_CallFunctionObjArgs(take, dfire_energy, array_object, NULL);
-        dfire_en_array = PyArray_GETPTR1(df_en_array, 0);
+        df_en_array = (PyArrayObject *)PyArray_Flatten(dfire_energy, NPY_CORDER);
+        //int row = PyArray_DIM(df_en_array, 0);
+        dfire_en_array = (double*)PyArray_GETPTR1(df_en_array, 0);
+        
+	compute_acc(rec_array, lig_array, rec_len, lig_len,
+                       rec_obj, lig_obj,  &interface_receptor, &interface_ligand, interface_cutoff, &interface_len, dfire_en_array, &energy);
 
-        //printf("size: %ld \n", sizeof(dfire_en_array));
-
-	compute_acc(rec_array, lig_array, rec_len, lig_len, &indexes_len,
-                       rec_obj, lig_obj,  &interface_receptor, &interface_ligand, &array, interface_cutoff, &interface_len, dfire_en_array, &energy);
-
-        PyArray_Free(tmp0, rec_array);
+ 	PyArray_Free(tmp0, rec_array);
         PyArray_Free(tmp1, lig_array);
         PyArray_Free(tmp2, rec_obj);
         PyArray_Free(tmp3, lig_obj);
 
-        
-        free(array);
-        //free(indexes);
-
         Py_DECREF(df_en_array);
-        Py_DECREF(array_object);
-        Py_DECREF(take);
     }
 
     dims[0] = interface_len;
 
-    interface_receptor = realloc(interface_receptor, interface_len*sizeof(unsigned int));
-    interface_ligand = realloc(interface_ligand, interface_len*sizeof(unsigned int));
+    interface_receptor = (unsigned int *)realloc(interface_receptor, interface_len*sizeof(unsigned int));
+    interface_ligand = (unsigned int *) realloc(interface_ligand, interface_len*sizeof(unsigned int));
 
     result = PyTuple_New(3);
     PyTuple_SET_ITEM(result, 0, PyFloat_FromDouble((energy*0.0157 - 4.7)*-1));
