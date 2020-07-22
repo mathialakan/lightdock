@@ -131,7 +131,8 @@ static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
     PyObject  *result = NULL;
     PyArrayObject *df_en_array;
     PyArrayObject *dfire_energy;
-    unsigned int  interface_len, *interface_receptor=NULL, *interface_ligand=NULL;
+    unsigned int  *interface_receptor=NULL, *interface_ligand=NULL;
+    unsigned int interface_len; 
     double interface_cutoff, energy, *dfire_en_array=NULL;
     npy_intp dims[1];
 
