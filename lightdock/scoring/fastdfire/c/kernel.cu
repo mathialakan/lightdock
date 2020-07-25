@@ -76,11 +76,11 @@ void __global__ compute_distance(double ** rec_array, double ** lig_array, unsig
         sub3 = receptor[y][2] - ligand[x][2];
         dist[index] = sub1*sub1 + sub2*sub2 + sub3*sub3;
 
-    }
+   }
 }
 
-__shared__ double receptor_obj[BLOCKDIMx];
-__shared__ double ligand_obj[BLOCKDIMy];
+__shared__ unsigned long receptor_obj[BLOCKDIMx];
+__shared__ unsigned long ligand_obj[BLOCKDIMy];
 void __global__ compute_neighbours( unsigned long * rec_obj, unsigned long * lig_obj, unsigned int rec_len, unsigned int lig_len, double * dist,
                                     unsigned int * interface_receptor,  unsigned int * interface_ligand, int *interface_len, double interface_cutoff, 
 				    unsigned int * array, int *index_len){
@@ -105,125 +105,105 @@ void __global__ compute_neighbours( unsigned long * rec_obj, unsigned long * lig
 
 	unsigned int sqrt_dist;
         unsigned int index = i*lig_len +j;
-        unsigned long dfire_bin;      
+        unsigned long dfire_bin;    
+        unsigned int prev_index;  
 
  	if (dist[index] <= 225.) {
 		sqrt_dist = (sqrt(dist[index])*2.0 - 1.0);
 		if (sqrt_dist < interface_cutoff){
-                	atomicAdd(interface_len, 1);
+                        prev_index = atomicAdd(interface_len, 1);
                 	//atomicInc(&(*interface_len), rec_len);
-                	interface_receptor[(*interface_len)] = i;
-                	interface_ligand[(*interface_len)] = j;
+                	interface_receptor[prev_index] = i;
+                	interface_ligand[prev_index] = j;
 		}
 		dfire_bin = dist_to_bins[sqrt_dist] -1;
-		//atomicInc(&indexes_len, rec_len*lig_len);
-		//array[indexes_len] = atoma*3360 + atomb*20 + dfire_bin;                
-		atomicAdd(index_len, 1);
-		//atomicInc(&(*index_len), rec_len*lig_len);
-		//index = atoma*3360 + atomb*20 + dfire_bin;                
-		array[(*index_len)] = receptor_obj[y]*3360 + ligand_obj[x]*20 + dfire_bin;                
+		//atomicInc(indexes_len, rec_len*lig_len);
+		array[atomicAdd(index_len, 1)] = receptor_obj[y]*3360 + ligand_obj[x]*20 + dfire_bin;                
         }
     }
 }
+
   
+__device__ double compute_partial_energy(double * dfire_en_array, unsigned int * array, int N , unsigned int en_len){
 
-__global__ void compute_energy(double * dfire_en_array, unsigned int * array, int N , double * energy){ 
-
-  __shared__ double senergy[BLOCKDIMx*BLOCKDIMy];
+   __shared__ double senergy[BLOCKDIMx*BLOCKDIMy];
    unsigned int i, x;
    x  =  threadIdx.x;
    i = blockDim.x*blockIdx.x +x;
+
    senergy[x] = 0.0;
    unsigned int index;
-   
+   double energyi = 0.0;
    while (i < N){
         index = array[i];
-        senergy[x] += dfire_en_array[index];
+        if ( index < en_len )  energyi = dfire_en_array[index];
+        senergy[x] += energyi;
         i += gridDim.x*blockDim.x;
    }
-   
+
    for( unsigned int k = blockDim.x/2; k>0; k>>=1){
+        __syncthreads();
+        if(x < k)
+            senergy[x] += senergy[x+k];
+   }
+   return senergy[x];
+}
+
+__device__ double compute_total_energy(volatile double * energy){
+
+   __shared__ double tot_energy;
+   unsigned int i, x;
+   x  =  threadIdx.x;
+   i = blockDim.x*blockIdx.x +x;
+   unsigned int lastblock = 64; //gridDim.x-1;
+   //if(blockIdx.x == lastblock){
+  	 if (x == 0){
+                unsigned int k = 0;
+                while(k < lastblock)
+        	tot_energy = energy[k++];
+               
+   	}
    	__syncthreads();
-    	if(x < k)
-	    senergy[x] += senergy[x+k];
-   }
-
-   if (x==0)
-      	atomicAdd(energy, senergy[0]);
-
-}
-
-/*
-// Calculate the partial energy by each block
-__device__ double calculate_partial_energy( const double * dfire_en_array, unsigned int N, unsigned int * array){
-
-    extern __shared__ double senergy[];
-    unsigned int k;
-    unsigned int x = threadIdx.x;
-    unsigned int i = blockIdx.x*blockDim.x +x;
-    unsigned int index = i; //array[i];
-    senergy[index] = dfire_en_array[index];
-   __syncthreads();
-
-   for ( k = 1; k < blockDim.x; k*2 ){
-        if (x%(2*k) == 0) senergy[x] += senergy[x+k];
-        __syncthreads();
-   }
-   if (x ==0 ) return senergy[0];
-}
-
-
-
-// Calculate the total energy by the last block
-__device__ double calculate_total_energy(volatile double * energy)
-{
-    double tot_energy = 0.0;
-    unsigned int i, nblocks = gridDim.x;
-
-    for (i = 0; i < nblocks; i++)
-        tot_energy += energy[i];
-
-    return tot_energy;
-
-}
-
+ /*
+   	if (i < lastblock){
+        	double penergy = energy[i];
+        //	atomicAdd(&tot_energy, penergy);
+       // tot_energy += energy[i];
+   	}
 */
+   return tot_energy;  
+
+}
 
 
-/*
- //Optimize ...
- //Calculate the partial energy by each block
-__device__ double calculate_partial_energy( const double * dfire_en_array){
-    
-    extern __shared__ double senergy[];
-
-    unsigned int k;
-    unsigned int x = threadIdx.x;
-    unsigned int i = blockIdx.x*blockDim.x*2 + x;
-    senergy[x] = dfire_en_array[i] + dfire_en_array[i + blockDim.x]
-    __syncthreads();
+__device__ unsigned int count = 0;
+__shared__ bool isLastBlockDone;
+__global__ void compute_energy(double * dfire_en_array, unsigned int * array, int N, unsigned int en_len, volatile double* energy){
  
-    unsigned int k;
-    for ( k = blockDim.x/2; k > 32; k >>=1){
-        if(x<k)
-        senergy[x] +=senergy[x +k];
-        __syncthreads();
+    double partial_energy = compute_partial_energy( dfire_en_array, array, N, en_len);
+
+    if (threadIdx.x == 0) {
+        energy[blockIdx.x] = partial_energy;
+
+        __threadfence();
+
+        unsigned int value = atomicInc(&count, gridDim.x);
+        isLastBlockDone = (value == (gridDim.x - 1));
     }
-    if (x < 32) calculate_warp(senergy, x) 
-    if ( x==0 ) return senergy[0];
+    __syncthreads();
+
+    if (isLastBlockDone) {
+        if(blockIdx.x == (gridDim.x -1)){
+        double total_energy = compute_total_energy(energy);
+        if (threadIdx.x == 0) {
+            energy[0] = total_energy;
+            count = 0;
+        }
+    }
+    }
+
 }
 
- //Clculate warp level energy by unrolling
-__device__ void calculate_warp(volatile double * senergy){
-  // blockDim should be >= 64 ...
-   senergy[x] += senergy[x +32];
-   senergy[x] += senergy[x +16];
-   senergy[x] += senergy[x +8];
-   senergy[x] += senergy[x +4];
-   senergy[x] += senergy[x +2];
-   senergy[x] += senergy[x +1];
-}
-*/
 
 
 /*
@@ -237,28 +217,32 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
                     unsigned int ** interface_ligand, double interface_cutoff, unsigned int *interface_len,
 		    double * dfire_en_array, double *energy){
  
+   unsigned int en_len = 564480;
    int * h_index_len = new int; 
    int * h_interface_len = new int; 
    double * h_energy = new double;
-   double ** d_rec_array,  ** d_lig_array;
+   double ** d_rec_array,  ** d_lig_array,* d_dist;
    unsigned long * d_rec_obj, * d_lig_obj;
    unsigned int  * d_interface_receptor, * d_interface_ligand;
    unsigned int  * d_array;
-   double * d_energy, * d_dfire_en_array, * d_dist;
    int * d_interface_len, *d_index_len;
+   double * d_dfire_en_array;
+   double * d_energy;
+   unsigned int nblocks = 64;
     
    size_t rec_bytes = rec_len*sizeof(double);
    size_t lig_bytes = lig_len*sizeof(double);
    size_t rec_lbytes = rec_len*sizeof(unsigned long);
    size_t lig_lbytes = lig_len*sizeof(unsigned long);
-   //size_t rec_ibytes = rec_len*sizeof(unsigned int);
-   //size_t lig_ibytes = lig_len*sizeof(unsigned int);
    
    unsigned int rl_len = rec_len*lig_len;
    size_t rl_ibytes = rl_len*sizeof(unsigned int);
    size_t rl_bytes = rl_len*sizeof(double);
-   
-  // unsigned int ** array = (unsigned int **) malloc(rl_ibytes);
+   printf("rl: %d \t rec: %d \t lig: %d \n", rl_len, rec_len, lig_len);  
+   (*interface_receptor) = (unsigned int *) malloc(rl_ibytes);
+   (*interface_ligand) = (unsigned int *)malloc(rl_ibytes);
+ 
+   unsigned int * array = (unsigned int *) malloc(rl_ibytes);
 
    cudaMalloc(&d_interface_len, sizeof(int));
    cudaCheck("Memory allocation for d_interface_len is failed ");
@@ -269,6 +253,8 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
    cudaCheck("Memory allocation for d_rec_array is failed ");
    cudaMalloc(&d_lig_array, lig_bytes);
    cudaCheck("Memory allocation for d_lig_array is failed ");
+   cudaMalloc(&d_dist, rl_bytes);
+   cudaCheck("Memory allocation for distance is failed ");
    cudaMalloc(&d_rec_obj, rec_lbytes);
    cudaCheck("Memory allocation for d_rec_obj is failed ");
    cudaMalloc(&d_lig_obj, lig_lbytes);
@@ -279,25 +265,27 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
    cudaCheck("Memory allocation for d_interface_ligand is failed ");
    cudaMalloc(&d_array, rl_ibytes);
    cudaCheck("Memory allocation for d_array is failed ");
-   cudaMalloc(&d_dist, rl_bytes);
-   cudaCheck("Memory allocation for distance is failed ");
-   cudaMalloc(&d_dfire_en_array, rl_bytes);
+   cudaMemset(d_array, 0, rl_ibytes);
+   cudaCheck("Memory set for d_array is failed ");
+   cudaMemset(d_index_len, 0, sizeof(int));
+   cudaCheck("Memory set for d_index_len is failed ");
+   cudaMemset(d_interface_len, 0, sizeof(int));
+   cudaCheck("Memory set for d_interface_len is failed ");
+   
+   unsigned int en_bytes = en_len*sizeof(double);  
+   cudaMalloc(&d_dfire_en_array, en_bytes);
    cudaCheck("Memory allocation for d_dfire_en_array is failed ");
-   cudaMalloc(&d_energy, sizeof(double));
+   cudaMalloc(&d_energy, nblocks*sizeof(double));
    cudaCheck("Memory allocation for d_energy is failed ");
   
-   cudaMemset(d_energy, 0, sizeof(double));
+   cudaMemset(d_energy, 0, nblocks*sizeof(double));
    cudaCheck("Memory set for d_energy is failed ");
-   cudaMemset(d_index_len, -1, sizeof(int));
-   cudaCheck("Memory set for d_index_len is failed ");
-   cudaMemset(d_interface_len, -1, sizeof(int));
-   cudaCheck("Memory set for d_interface_len is failed ");
-
+   
    unsigned int nstreams = 3;
    cudaStream_t stream[nstreams];
    for( unsigned int i =0; i < nstreams; ++i)
         cudaStreamCreate(&stream[i]);
-
+   
    cudaMemcpyAsync(d_rec_array, rec_array, rec_bytes, cudaMemcpyHostToDevice, stream[0]);
    cudaCheck("Data transfer from H2D for d_rec_array is failed ");
    cudaMemcpyAsync(d_lig_array, lig_array, lig_bytes, cudaMemcpyHostToDevice, stream[0]);
@@ -308,7 +296,7 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
    cudaMemcpyAsync(d_lig_obj, lig_obj, lig_lbytes, cudaMemcpyHostToDevice, stream[1]);
    cudaCheck("Data transfer from H2D for d_lig_obj is failed ");
    
-   cudaMemcpyAsync(d_dfire_en_array, dfire_en_array, rl_bytes, cudaMemcpyHostToDevice, stream[2]);
+   cudaMemcpyAsync(d_dfire_en_array, dfire_en_array, en_bytes, cudaMemcpyHostToDevice, stream[2]);
    cudaCheck("Data transfer from H2D for d_dfire_en_array is failed ");
 
    const dim3 blockSize(BLOCKDIMx, BLOCKDIMy);
@@ -316,53 +304,46 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
    int GRIDDIMy = (BLOCKDIMy +lig_len -1)/BLOCKDIMy;
    const dim3 gridSize( GRIDDIMx, GRIDDIMy);
 
-//   int nblocks = GRIDDIMx*GRIDDIMy;
-   cudaProfilerStart();
+  //  int nblocks = GRIDDIMx*GRIDDIMy;
+  // cudaProfilerStart();
 
-   compute_distance<<< gridSize, blockSize, 0, stream[0]>>>(d_rec_array, d_lig_array, rec_len, lig_len, d_dist);
+   compute_distance<<< gridSize, blockSize, 0, stream[0] >>>(d_rec_array, d_lig_array, rec_len, lig_len, d_dist);
    cudaCheck(" compute_dist kernel launching is failed ");
  
    cudaStreamSynchronize(stream[0]);    //--- Make sure the completion of the distance computation
    
-   compute_neighbours<<< gridSize, blockSize, 0, stream[1]>>>( d_rec_obj, d_lig_obj, rec_len, lig_len, d_dist,
+   compute_neighbours<<< gridSize, blockSize, 0, stream[1] >>>( d_rec_obj, d_lig_obj, rec_len, lig_len, d_dist,
                          d_interface_receptor, d_interface_ligand, d_interface_len, interface_cutoff, d_array, d_index_len);
    cudaCheck(" compute_neighbour kernel launching is failed ");
    
    cudaMemcpyAsync(h_index_len, d_index_len, sizeof(int), cudaMemcpyDeviceToHost, stream[1]);
    cudaCheck("Data transfer from D2H for index_len is failed ");
 
-   cudaStreamSynchronize(stream[1]);    //--- Make sure the completion of the neighbor list computation
-   //cudaDeviceSynchronize();
-   //cudaCheck("Synchronization is failed ");
-
    int index_len = *h_index_len; 
    const unsigned int nthreads = BLOCKDIMx *BLOCKDIMy;
-   unsigned int nblocks = ceil((index_len +nthreads -1)/nthreads);
-
+ //  unsigned int nblocks = ceil((index_len +nthreads -1)/nthreads);
    const dim3 blockSize1D(nthreads);
    const dim3 gridSize1D(nblocks);
-   compute_energy<<< gridSize1D, blockSize1D, 0, stream[2]>>>(d_dfire_en_array, d_array, index_len, d_energy);
-
-   cudaCheck(" calculate_energy kernel launching is failed ");
    
    cudaMemcpyAsync(h_interface_len, d_interface_len, sizeof(int), cudaMemcpyDeviceToHost, stream[1]);
-   cudaCheck("Data transfer from DtoH for interface_len is failed ");
+   cudaCheck("Data transfer from D2H for interface_len is failed ");
+   printf("h_interfac::  %d \n", (*h_interface_len));
 
-   cudaMemcpyAsync(interface_receptor, d_interface_receptor, rl_ibytes, cudaMemcpyDeviceToHost, stream[1]);
-   cudaCheck("Data transfer from DtoH for interface_receptor is failed ");
-   cudaMemcpyAsync(interface_ligand, d_interface_ligand, rl_ibytes, cudaMemcpyDeviceToHost, stream[1]);
-   cudaCheck("Data transfer from DtoH for interface_ligand is failed ");
-
-  cudaMemcpyAsync(h_energy, d_energy, sizeof(double), cudaMemcpyDeviceToHost, stream[2]);
-  cudaCheck("Data transfer from DtoH for energy is failed ");
-
+   cudaMemcpyAsync((*interface_receptor), d_interface_receptor, rl_ibytes, cudaMemcpyDeviceToHost, stream[1]);
+   cudaCheck("Data transfer from D2H for interface_receptor is failed ");
+   cudaMemcpyAsync((*interface_ligand), d_interface_ligand, rl_ibytes, cudaMemcpyDeviceToHost, stream[1]);
+   cudaCheck("Data transfer from D2H for interface_ligand is failed ");
   
-   for( unsigned int i =0; i < nstreams; ++i)
-        cudaStreamDestroy(stream[i]);
+   cudaStreamSynchronize(stream[1]);    //--- Make sure the completion of the neighbor list computation
+   compute_energy<<< gridSize1D, blockSize1D, 0, stream[2]>>>(d_dfire_en_array, d_array, index_len, en_len, d_energy);
+   cudaCheck(" calculate_energy kernel launching is failed ");
 
-   cudaProfilerStop();
+   cudaMemcpyAsync(h_energy, d_energy, sizeof(double), cudaMemcpyDeviceToHost, stream[2]);
+   cudaCheck("Data transfer from D2H for energy is failed ");
+   printf("energy: %f \n", (*h_energy));   
+
+  // cudaProfilerStop();
    
-   printf("energy: %.f/n", (*h_energy));   
    (*energy) = (*h_energy);
    (*interface_len) = (*h_interface_len);
    
