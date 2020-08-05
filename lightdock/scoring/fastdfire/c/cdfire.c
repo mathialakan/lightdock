@@ -4,15 +4,14 @@
 #include <Python.h>
 #include "structmember.h"
 #include "numpy/arrayobject.h"
-
+#include <pthread.h>
+#include <openacc.h>
 
 extern void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len, unsigned int lig_len,
                     unsigned long * rec_obj, unsigned long * lig_obj, unsigned int ** interface_receptor,
                     unsigned int ** interface_ligand, double interface_cutoff, unsigned int *interface_len,
                     double * dfire_en_array, double *energy); 
 
-
-//extern void add();
 
 /**
  *
@@ -55,10 +54,41 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
    //size_t bytes1 = tot_len*sizeof(unsigned int);
    double * dist = malloc(tot_len*sizeof(double));
    unsigned int * indexes = malloc(3*tot_len*sizeof(unsigned int));
-   
-   //---------------------------------------------------------
+  
+/*
+#define NSTREAMS 4
+   static pthread_mutex_t lock;  
+   static long streams[NSTREAMS] = {1,2,3,4};
+
+Py_BEGIN_ALLOW_THREADS
+   acc_device_t dt = acc_get_device_type();
+   pthread_t tid = pthread_self();
+   pthread_mutex_lock(&lock);
+   int mystream = -1;
+   for (int i = 0; i< NSTREAMS; i++){
+      if (streams[i] == 0){
+          streams[i] == tid;
+          mystream = i;
+          break;
+       }
+      else if (streams[i] == tid){
+         mystream = i;
+         break;
+      }
+   } 
+ 
+   pthread_mutex_unlock(&lock);
+   if (mystream == -1){
+            printf("USing more threads than streams - ERROR \n");
+            exit(1);
+        }
+
+        printf("Thread %d using stream %d\n", tid, mystream);
+*/
+/*   //---------------------------------------------------------
    //Computing distance 
    double sub1, sub2, sub3;
+#pragma acc parallel loop copyin(rec_array[0:rec_len], lig_array[0:lig_len]) copy(dist) async(1)
    for (i = 0; i < rec_len; i++) {
         for (j = 0; j < lig_len; j++) {
             sub1 = rec_array[i][0] - lig_array[j][0];
@@ -68,8 +98,10 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
         }
     }
 
-   //Filtering atoms
+#pragma acc wait(1)
+   //Computing neighbor list
    n = 0;
+#pragma acc parallel loop copyin(dist) copy(indexes) async(2)
    for(i = 0; i < tot_len; i++){
        if (dist[i] <= 225.) {
                 indexes[n++] = i/rec_len;
@@ -79,6 +111,7 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
             }
    }
 
+#pragma acc wait(2)
    indexes = realloc(indexes, n*sizeof(unsigned int));
     // free(*interface_receptor);
 
@@ -89,6 +122,7 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
    *interface_receptor = malloc(bytes);
    *interface_ligand = malloc(bytes);
 
+#pragma acc parallel loop copyin(rec_obj, lig_obj, indexes[0:indexes_len], dist_to_bins[0:49]) copy(array[0:indexes_len]) async(3)
    for(n = m = 0; n < indexes_len; n++){ 
        i = indexes[m++];
        j = indexes[m++];
@@ -105,18 +139,26 @@ void compute_acc(double ** rec_array, double ** lig_array, unsigned int rec_len,
        array[n] = atoma*168*20 + atomb*20 + dfire_bin;
    }
      
+#pragma acc wait(3)
     //---------------------------------------------------------
     // Computing energy 
+    double energy_ = 0;
     unsigned int index;
+#pragma acc parallel loop copyin(dfire_en_array[0:indexes_len]) copy(energy_) reduction(+:energy_) async(4)
     for (n = 0; n < indexes_len; n++) {
        index = array[n];
-        (*energy) += dfire_en_array[n];
+        energy_ += dfire_en_array[n];
     }
-
-        free(array);
    
-        free(indexes);
   //      printf("indexes_len: %d\n", (*indexes_len));
+#pragma acc wait(4)
+    printf("len  = %d  energy = %.6lf \n", indexes_len, energy_);
+    *energy = energy_;
+    free(array);
+    free(indexes);
+    free(dist);
+//Py_END_ALLOW_THREADS
+
 }
 
 */
@@ -171,6 +213,7 @@ static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
     	Py_DECREF(tmp1);
 
 
+        //double testsqrt  = (sqrt(2.45)*2.0 - 1.0);
         // Do not need to free rec_objects and lig_objects
         tmp2 = PyObject_GetAttrString(receptor, "objects");
         int rec_obj_len = PySequence_Size(tmp2);
@@ -197,9 +240,16 @@ static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
         df_en_array = (PyArrayObject *)PyArray_Flatten(dfire_energy, NPY_CORDER);
         //int row = PyArray_DIM(df_en_array, 0);
         dfire_en_array = (double*)PyArray_GETPTR1(df_en_array, 0);
-        
+
+//Py_BEGIN_ALLOW_THREADS
+//	pthread_t tid = pthread_self();	
+	        
 	compute_acc(rec_array, lig_array, rec_len, lig_len,
                        rec_obj, lig_obj,  &interface_receptor, &interface_ligand, interface_cutoff, &interface_len, dfire_en_array, &energy);
+	
+//	printf(" computed energy %.6lf \n", energy);
+	//printf("thread id %d computed energy %.6lf \n", tid, energy);
+//Py_END_ALLOW_THREADS
 
  	PyArray_Free(tmp0, rec_array);
         PyArray_Free(tmp1, lig_array);
@@ -211,8 +261,8 @@ static PyObject * cdfire_calculate_dfire(PyObject *self, PyObject *args) {
 
     dims[0] = interface_len;
 
-    interface_receptor = (unsigned int *)realloc(interface_receptor, interface_len*sizeof(unsigned int));
-    interface_ligand = (unsigned int *) realloc(interface_ligand, interface_len*sizeof(unsigned int));
+  //  interface_receptor = (unsigned int *)realloc(interface_receptor, interface_len*sizeof(unsigned int));
+  //  interface_ligand = (unsigned int *) realloc(interface_ligand, interface_len*sizeof(unsigned int));
 
     result = PyTuple_New(3);
     PyTuple_SET_ITEM(result, 0, PyFloat_FromDouble((energy*0.0157 - 4.7)*-1));
